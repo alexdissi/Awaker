@@ -77,6 +77,7 @@ final class AwakeController {
         let timer = Timer(timeInterval: tickInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
+        timer.tolerance = tickInterval / 6
         RunLoop.main.add(timer, forMode: .common)
         ticker = timer
     }

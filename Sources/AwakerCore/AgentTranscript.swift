@@ -18,6 +18,17 @@ public enum TranscriptParser {
     /// Reads the lines from the newest to the oldest and keeps the newest of each kind.
     /// The first line may be cut (the text is usually a file's tail); invalid lines are skipped.
     public static func details(in text: String) -> AgentDetails {
+        scan(text).details
+    }
+
+    public static func details(in appended: String, continuing older: AgentDetails) -> AgentDetails {
+        let (fresh, sawAssistant) = scan(appended)
+        var details = fresh.filling(from: older)
+        if !sawAssistant { details.pendingAction = older.pendingAction }
+        return details
+    }
+
+    private static func scan(_ text: String) -> (details: AgentDetails, sawAssistant: Bool) {
         var details = AgentDetails()
         var sawAssistant = false
         for line in text.split(separator: "\n").reversed() {
@@ -42,7 +53,7 @@ public enum TranscriptParser {
                     .flatMap(clean)
             }
         }
-        return details
+        return (details, sawAssistant)
     }
 
     /// The newest `cost-state` entry in a chunk of transcript.
@@ -127,6 +138,26 @@ public struct AgentSessionReader: Sendable {
         defer { try? handle.close() }
         let end = (try? handle.seekToEnd()) ?? 0
         return TranscriptParser.details(in: read(handle, from: end > tailLength ? end - tailLength : 0, length: tailLength))
+    }
+
+    public func details(in transcript: URL, resumingAt offset: UInt64?, older: AgentDetails) -> (details: AgentDetails, readUpTo: UInt64) {
+        guard let handle = try? FileHandle(forReadingFrom: transcript) else { return (older, offset ?? 0) }
+        defer { try? handle.close() }
+        let end = (try? handle.seekToEnd()) ?? 0
+        let continues = offset.map { $0 <= end && end - $0 <= tailLength } ?? false
+        let start = continues ? offset ?? 0 : (end > tailLength ? end - tailLength : 0)
+        try? handle.seek(toOffset: start)
+        let data = (try? handle.read(upToCount: Int(end - start))) ?? Data()
+        guard let lastNewline = data.lastIndex(of: UInt8(ascii: "\n")) else {
+            return (continues ? older : AgentDetails().filling(from: older), start)
+        }
+        let complete = data[data.startIndex...lastNewline]
+        let text = String(decoding: complete, as: UTF8.self)
+        let readUpTo = start + UInt64(complete.count)
+        let details = continues
+            ? TranscriptParser.details(in: text, continuing: older)
+            : TranscriptParser.details(in: text).filling(from: older)
+        return (details, readUpTo)
     }
 
     /// Looks further back for the last recorded cost, which Claude Code only writes now and then.

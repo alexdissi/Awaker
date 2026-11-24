@@ -150,7 +150,7 @@ struct BackdropView: View {
                         .blur(radius: Backdrop.blurRadius, opaque: true)
                         .frame(width: proxy.size.width, height: proxy.size.height)
                         .clipped()
-                    if let video {
+                    if let video, settings.backdropStyle == .ascii {
                         VideoLoopView(video: video)
                             // A new scene brings a new player: the layer must be rebuilt around it.
                             .id(ObjectIdentifier(video))
@@ -158,14 +158,14 @@ struct BackdropView: View {
                     switch settings.backdropStyle {
                     case .ascii:
                         Color.black.opacity(scene.dim)
-                        ArtView(size: proxy.size, isPaused: !isAnimating, frame: { video?.currentFrame() ?? image }) { frame, scale in
-                            Backdrop.artist.render(frame, size: proxy.size, scale: scale).map { ($0, scale) }
+                        ArtView(isPaused: !isAnimating, frame: { video?.currentFrame() ?? image }) { frame, size, scale in
+                            Backdrop.artist.render(frame, size: size, scale: scale).map { ($0, scale) }
                         }
                         .mask { WindowButtonsClearing() }
                     case .dither:
                         // Opaque: it replaces the picture rather than sitting on it.
-                        ArtView(size: proxy.size, isPaused: !isAnimating, frame: { video?.currentFrame() ?? image }) { frame, scale in
-                            Backdrop.ditherer.render(frame, size: proxy.size, scale: scale, dot: settings.ditherDot)
+                        ArtView(isPaused: !isAnimating, frame: { video?.currentFrame() ?? image }) { [ditherDot = settings.ditherDot] frame, size, scale in
+                            Backdrop.ditherer.render(frame, size: size, scale: scale, dot: ditherDot)
                         }
                         .mask { WindowButtonsClearing() }
                         Color.black.opacity(Backdrop.ditherDim)
@@ -312,28 +312,88 @@ private struct VideoLoopView: NSViewRepresentable {
 ///
 /// The art is rendered to a bitmap and shown as a plain image. Drawing the glyphs
 /// in a SwiftUI `Canvas` looked right in offscreen renders but never reached the screen.
-private struct ArtView: View {
-    let size: CGSize
+private struct ArtView: NSViewRepresentable {
     /// A still picture is drawn once; nothing is redrawn while paused.
     let isPaused: Bool
     /// The image currently shown behind the art.
     let frame: () -> CGImage?
-    /// The frame as art for a display scale, with the scale the bitmap was made at (pixels per point).
-    let render: (CGImage, CGFloat) -> (image: CGImage, scale: CGFloat)?
+    /// The frame as art for a view size and display scale, with the scale the bitmap was made at (pixels per point).
+    let render: (CGImage, CGSize, CGFloat) -> (image: CGImage, scale: CGFloat)?
 
-    @Environment(\.displayScale) private var displayScale
+    func makeNSView(context: Context) -> ArtLayerView { ArtLayerView() }
 
-    /// Four pictures a second: the loop plays slowly, and each picture costs a few milliseconds of processor.
+    func updateNSView(_ view: ArtLayerView, context: Context) {
+        view.frameSource = frame
+        view.render = render
+        view.isPaused = isPaused
+    }
+}
+
+private final class ArtLayerView: NSView {
+    var frameSource: () -> CGImage? = { nil }
+    var render: (CGImage, CGSize, CGFloat) -> (image: CGImage, scale: CGFloat)? = { _, _, _ in nil }
+    var isPaused = true {
+        didSet { if isPaused != oldValue { scheduleFrames() } }
+    }
+
+    private let artLayer = CALayer()
+    private var timer: Timer?
     private let frameInterval = 0.25
 
-    var body: some View {
-        TimelineView(SteadySchedule(interval: frameInterval, paused: isPaused)) { _ in
-            if let image = frame(), let art = render(image, displayScale) {
-                Image(decorative: art.image, scale: art.scale)
-                    .interpolation(.none)
-                    .frame(width: size.width, height: size.height, alignment: .topLeading)
-                    .clipped()
-            }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        artLayer.contentsGravity = .topLeft
+        artLayer.magnificationFilter = .nearest
+        artLayer.masksToBounds = true
+        artLayer.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull(), "contentsScale": NSNull()]
+        layer = artLayer
+        wantsLayer = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        scheduleFrames()
+        redraw()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        redraw()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let changed = newSize != frame.size
+        super.setFrameSize(newSize)
+        if changed { redraw() }
+    }
+
+    private var displayScale: CGFloat { window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2 }
+
+    private func scheduleFrames() {
+        timer?.invalidate()
+        timer = nil
+        guard !isPaused, window != nil else { return }
+        let timer = Timer(timeInterval: frameInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.redraw() }
         }
+        timer.tolerance = frameInterval / 5
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    private func redraw() {
+        let size = bounds.size
+        guard window != nil, size.width > 0, size.height > 0,
+              let image = frameSource(), let art = render(image, size, displayScale) else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        artLayer.contentsScale = art.scale
+        artLayer.contents = art.image
+        CATransaction.commit()
     }
 }

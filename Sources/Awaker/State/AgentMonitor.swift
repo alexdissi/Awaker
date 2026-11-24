@@ -48,7 +48,9 @@ final class AgentMonitor {
     private let minimumAbsence: TimeInterval = 5 * 60
 
     private struct CachedDetails: Sendable {
+        var transcript: URL
         var modified: Date
+        var readUpTo: UInt64
         var details: AgentDetails
         /// The one-off search for the last recorded cost has been done.
         var searchedCost: Bool
@@ -80,6 +82,7 @@ final class AgentMonitor {
         let timer = Timer(timeInterval: pollInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.refresh() }
         }
+        timer.tolerance = pollInterval / 4
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
         watchPresence()
@@ -139,7 +142,9 @@ final class AgentMonitor {
             let commands = AgentSessionReader.runningCommands(of: Set(found.map(\.pid)))
             let sessions = found.map { session -> AgentSession in
                 var session = session
-                let transcript = reader.transcript(of: session)
+                let transcript = (cache[session.id]?.transcript)
+                    .flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+                    ?? reader.transcript(of: session)
                 session.details = Self.details(of: session, transcript: transcript, reader: reader, cache: &cache)
                 session.subagents = readsSubagents
                     ? transcript.map { reader.subagents(besideTranscript: $0) } ?? []
@@ -153,7 +158,8 @@ final class AgentMonitor {
         // While the user is away, changes are held for the recap (or told on return).
         if hasBaseline && absence == nil { notifyChanges(from: agents, to: sessions) }
         cache = newCache
-        agents = sessions.sortedForDisplay()
+        let sorted = sessions.sortedForDisplay()
+        if sorted != agents { agents = sorted }
         hasBaseline = true
     }
 
@@ -163,15 +169,19 @@ final class AgentMonitor {
         let cached = cache[session.id]
         guard let transcript else { return cached?.details ?? AgentDetails() }
         let modified = (try? transcript.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
-        if let cached, cached.modified == modified { return cached.details }
+        let sameFile = cached?.transcript == transcript
+        if let cached, sameFile, cached.modified == modified { return cached.details }
 
-        var details = reader.details(in: transcript).filling(from: cached?.details ?? AgentDetails())
+        let read = reader.details(in: transcript, resumingAt: sameFile ? cached?.readUpTo : nil,
+                                  older: cached?.details ?? AgentDetails())
+        var details = read.details
         var searchedCost = cached?.searchedCost ?? false
         if details.cost == nil && !searchedCost {
             details.cost = reader.lastCost(in: transcript)
             searchedCost = true
         }
-        cache[session.id] = CachedDetails(modified: modified, details: details, searchedCost: searchedCost)
+        cache[session.id] = CachedDetails(transcript: transcript, modified: modified, readUpTo: read.readUpTo,
+                                          details: details, searchedCost: searchedCost)
         return details
     }
 

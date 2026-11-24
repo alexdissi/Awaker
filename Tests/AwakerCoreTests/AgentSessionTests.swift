@@ -205,6 +205,50 @@ import Testing
         #expect(reader.details(in: file).cost == nil)
         #expect(reader.lastCost(in: file)?.dollars == 7.5)
     }
+
+    @Test func readsOnlyWhatWasAppendedAndKeepsAPartialLineForLater() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("s.jsonl")
+        let reader = AgentSessionReader(claudeDirectory: root)
+        let first = """
+        {"type":"ai-title","aiTitle":"Titre","sessionId":"s"}
+        {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git push"}}]}}
+
+        """
+        try Data(first.utf8).write(to: file)
+        let initial = reader.details(in: file, resumingAt: nil, older: AgentDetails())
+        #expect(initial.readUpTo == UInt64(first.utf8.count))
+        #expect(initial.details.pendingAction == "git push")
+
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("{\"type\":\"last-prompt\",\"lastPrompt\":\"vas-y\"}\n{\"type\":\"ai-ti".utf8))
+        let partial = reader.details(in: file, resumingAt: initial.readUpTo, older: initial.details)
+        #expect(partial.details.title == "Titre")
+        #expect(partial.details.lastPrompt == "vas-y")
+        #expect(partial.details.pendingAction == "git push")
+
+        try handle.write(contentsOf: Data("tle\",\"aiTitle\":\"Nouveau\"}\n{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Fini.\"}]}}\n".utf8))
+        try handle.close()
+        let completed = reader.details(in: file, resumingAt: partial.readUpTo, older: partial.details)
+        #expect(completed.details.title == "Nouveau")
+        #expect(completed.details.lastReply == "Fini.")
+        #expect(completed.details.pendingAction == nil)
+    }
+
+    @Test func readsTheTailAfreshWhenTheFileShrank() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("s.jsonl")
+        try Data("{\"type\":\"ai-title\",\"aiTitle\":\"Autre\"}\n".utf8).write(to: file)
+        let read = AgentSessionReader(claudeDirectory: root)
+            .details(in: file, resumingAt: 10_000, older: AgentDetails(title: "Ancien", pendingAction: "rm"))
+        #expect(read.details.title == "Autre")
+        #expect(read.details.pendingAction == nil)
+    }
 }
 
 @Suite struct SubAgentTests {

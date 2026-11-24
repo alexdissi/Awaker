@@ -12,6 +12,7 @@ struct SteadySchedule: TimelineSchedule {
     func entries(from startDate: Date, mode: TimelineScheduleMode) -> AnySequence<Date> {
         guard !paused else { return AnySequence([startDate]) }
         let interval = interval
-        return AnySequence(sequence(first: startDate) { $0.addingTimeInterval(interval) })
+        let aligned = Date(timeIntervalSinceReferenceDate: (startDate.timeIntervalSinceReferenceDate / interval).rounded(.down) * interval)
+        return AnySequence(sequence(first: aligned) { $0.addingTimeInterval(interval) })
     }
 }
